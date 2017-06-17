@@ -86,7 +86,7 @@ int ubi_change_vtbl_record(struct ubi_device *ubi, int idx,
 
 	ubi_assert(idx >= 0 && idx < ubi->vtbl_slots);
 	layout_vol = ubi->volumes[vol_id2idx(ubi, UBI_LAYOUT_VOLUME_ID)];
-
+	printk(KERN_ALERT "Passed it !");
 	if (!vtbl_rec)
 		vtbl_rec = &empty_vtbl_record;
 	else {
@@ -97,13 +97,18 @@ int ubi_change_vtbl_record(struct ubi_device *ubi, int idx,
 	memcpy(&ubi->vtbl[idx], vtbl_rec, sizeof(struct ubi_vtbl_record));
 	for (i = 0; i < UBI_LAYOUT_VOLUME_EBS; i++) {
 		err = ubi_eba_unmap_leb(ubi, layout_vol, i);
-		if (err)
+		if (err) {
+			printk("Got error on ubi_eba_unmap_leb : %d\n", err);
 			return err;
+		}
 
 		err = ubi_eba_write_leb(ubi, layout_vol, i, ubi->vtbl, 0,
 					ubi->vtbl_size);
-		if (err)
+		printk("%s - eba_write terminated ...\n", __func__);
+		if (err) {
+			printk("Got error on ubi_eba_write_leb : %d\n", err);
 			return err;
+		}
 	}
 
 	self_vtbl_check(ubi);
@@ -210,8 +215,13 @@ static int vtbl_check(const struct ubi_device *ubi,
 			err = 3;
 			goto bad;
 		}
-
+#ifdef CONFIG_UBI_CRYPTO_HMAC
+		n = (vtbl->hmac) ? ubi->hmac_leb_size
+				         : ubi->leb_size;
+		if (alignment > n || alignment == 0) {
+#else
 		if (alignment > ubi->leb_size || alignment == 0) {
+#endif // CONFIG_UBI_CRYPTO_HMAC
 			err = 4;
 			goto bad;
 		}
@@ -221,8 +231,14 @@ static int vtbl_check(const struct ubi_device *ubi,
 			err = 5;
 			goto bad;
 		}
-
+#ifdef CONFIG_UBI_CRYPTO_HMAC
+		if (vtbl->hmac)
+			n = ubi->hmac_leb_size % alignment;
+		else
+			n = ubi->leb_size % alignment;
+#else
 		n = ubi->leb_size % alignment;
+#endif // CONFIG_UBI_CRYPTO_HMAC
 		if (data_pad != n) {
 			ubi_err("bad data_pad, has to be %d", n);
 			err = 6;
@@ -302,6 +318,9 @@ static int create_vtbl(struct ubi_device *ubi, struct ubi_attach_info *ai,
 {
 	int err, tries = 0;
 	struct ubi_vid_hdr *vid_hdr;
+#ifdef CONFIG_UBI_CRYPTO_HMAC
+	struct ubi_hmac_hdr *hmac_hdr;
+#endif // CONFIG_UBI_CRYPTO_HMAC
 	struct ubi_ainf_peb *new_aeb;
 
 	dbg_gen("create volume table (copy #%d)", copy + 1);
@@ -309,6 +328,14 @@ static int create_vtbl(struct ubi_device *ubi, struct ubi_attach_info *ai,
 	vid_hdr = ubi_zalloc_vid_hdr(ubi, GFP_KERNEL);
 	if (!vid_hdr)
 		return -ENOMEM;
+
+#ifdef CONFIG_UBI_CRYPTO_HMAC
+	hmac_hdr = ubi_zalloc_hmac_hdr(ubi, GFP_KERNEL);
+	if (!hmac_hdr) {
+		ubi_free_vid_hdr(ubi, vid_hdr);
+		return -ENOMEM;
+	}
+#endif // CONFIG_UBI_CRYPTO_HMAC
 
 retry:
 	new_aeb = ubi_early_get_peb(ubi, ai);
@@ -324,13 +351,24 @@ retry:
 			     vid_hdr->data_pad = cpu_to_be32(0);
 	vid_hdr->lnum = cpu_to_be32(copy);
 	vid_hdr->sqnum = cpu_to_be64(++ai->max_sqnum);
-
+#ifdef CONFIG_UBI_CRYPTO_HMAC
+	if (ubi->hmac) {
+		vid_hdr->hmac_hdr_offset = ubi->hmac_hdr_offset;
+	}
+#endif // CONFIG_UBI_CRYPTO_HMAC
 	/* The EC header is already there, write the VID header */
 	err = ubi_io_write_vid_hdr(ubi, new_aeb->pnum, vid_hdr);
 	if (err)
 		goto write_error;
 
+#ifdef CONFIG_UBI_CRYPTO_HMAC
+	err = ubi_io_write_hmac_hdr(ubi, new_aeb->pnum, hmac_hdr);
+	if (err)
+		goto write_error;
+#endif
 	/* Write the layout volume contents */
+	/* The layout volume is never encrypted, but
+	 * the header could be present for consistency */
 	err = ubi_io_write_data(ubi, vtbl, new_aeb->pnum, 0, ubi->vtbl_size);
 	if (err)
 		goto write_error;
@@ -355,6 +393,9 @@ write_error:
 	}
 	kmem_cache_free(ai->aeb_slab_cache, new_aeb);
 out_free:
+#ifdef CONFIG_UBI_CRYPTO_HMAC
+	ubi_free_hmac_hdr(ubi, hmac_hdr);
+#endif // CONFIG_UBI_CRYPTO_HMAC
 	ubi_free_vid_hdr(ubi, vid_hdr);
 	return err;
 
@@ -416,7 +457,7 @@ static struct ubi_vtbl_record *process_lvol(struct ubi_device *ubi,
 		}
 
 		err = ubi_io_read_data(ubi, leb[aeb->lnum], aeb->pnum, 0,
-				       ubi->vtbl_size);
+				ubi->vtbl_size);
 		if (err == UBI_IO_BITFLIPS || mtd_is_eccerr(err))
 			/*
 			 * Scrub the PEB later. Note, -EBADMSG indicates an
@@ -499,9 +540,22 @@ static struct ubi_vtbl_record *create_empty_lvol(struct ubi_device *ubi,
 	int i;
 	struct ubi_vtbl_record *vtbl;
 
+#ifdef CONFIG_UBI_CRYPTO_HMAC
+	empty_vtbl_record.hmac = 1;
+	ubi->hmac = 1;
+	ubi->vtbl_slots = ubi->hmac_leb_size / UBI_VTBL_RECORD_SIZE;
+	if (ubi->vtbl_slots > UBI_MAX_VOLUMES)
+		ubi->vtbl_slots = UBI_MAX_VOLUMES;
+	ubi->vtbl_size = ubi->vtbl_slots*UBI_VTBL_RECORD_SIZE;
+	ubi->vtbl_size = ALIGN(ubi->vtbl_size, ubi->min_io_size);
+#endif // CONFIG_UBI_CRYPTO_HMAC
+
 	vtbl = vzalloc(ubi->vtbl_size);
 	if (!vtbl)
 		return ERR_PTR(-ENOMEM);
+
+
+	printk("Creating empty layout volume !\n");
 
 	for (i = 0; i < ubi->vtbl_slots; i++)
 		memcpy(&vtbl[i], &empty_vtbl_record, UBI_VTBL_RECORD_SIZE);
@@ -554,7 +608,17 @@ static int init_volumes(struct ubi_device *ubi,
 		vol->vol_type = vtbl[i].vol_type == UBI_VID_DYNAMIC ?
 					UBI_DYNAMIC_VOLUME : UBI_STATIC_VOLUME;
 		vol->name_len = be16_to_cpu(vtbl[i].name_len);
+#ifdef CONFIG_UBI_CRYPTO_HMAC
+		if (vtbl[i].hmac) {
+			vol->usable_leb_size = ubi->hmac_leb_size -
+								   vol->data_pad;
+			vol->hmac = 1;
+		}
+		else
+			vol->usable_leb_size = ubi->leb_size - vol->data_pad;
+#else
 		vol->usable_leb_size = ubi->leb_size - vol->data_pad;
+#endif // CONFIG_UBI_CRYPTO_HMAC
 		memcpy(vol->name, vtbl[i].name, vol->name_len);
 		vol->name[vol->name_len] = '\0';
 		vol->vol_id = i;
@@ -785,7 +849,13 @@ int ubi_read_volume_table(struct ubi_device *ubi, struct ubi_attach_info *ai)
 	 * The number of supported volumes is limited by the eraseblock size
 	 * and by the UBI_MAX_VOLUMES constant.
 	 */
+#ifdef CONFIG_UBI_CRYPTO_HMAC
+	if (ubi->hmac) {
+		ubi->vtbl_slots = ubi->hmac_leb_size / UBI_VTBL_RECORD_SIZE;
+	}
+#else
 	ubi->vtbl_slots = ubi->leb_size / UBI_VTBL_RECORD_SIZE;
+#endif // CONFIG_UBI_CRYPTO_HMAC
 	if (ubi->vtbl_slots > UBI_MAX_VOLUMES)
 		ubi->vtbl_slots = UBI_MAX_VOLUMES;
 

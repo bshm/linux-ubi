@@ -46,6 +46,11 @@
 /* Volume identifier header magic number (ASCII "UBI!") */
 #define UBI_VID_HDR_MAGIC 0x55424921
 
+#ifdef CONFIG_UBI_CRYPTO_HMAC
+/* HMAC header magic number (ASCII "UBIC") */
+#define UBI_HMAC_HDR_MAGIC 0x55424943
+#endif
+
 /*
  * Volume type constants used in the volume identifier header.
  *
@@ -115,7 +120,10 @@ enum {
 /* Sizes of UBI headers */
 #define UBI_EC_HDR_SIZE  sizeof(struct ubi_ec_hdr)
 #define UBI_VID_HDR_SIZE sizeof(struct ubi_vid_hdr)
-
+#ifdef CONFIG_UBI_CRYPTO_HMAC
+#define UBI_HMAC_HDR_SIZE sizeof(struct ubi_hmac_hdr)
+#define UBI_HMAC_HDR_SIZE_CRC (UBI_HMAC_HDR_SIZE - sizeof(__be32))
+#endif
 /* Sizes of UBI headers without the ending CRC */
 #define UBI_EC_HDR_SIZE_CRC  (UBI_EC_HDR_SIZE  - sizeof(__be32))
 #define UBI_VID_HDR_SIZE_CRC (UBI_VID_HDR_SIZE - sizeof(__be32))
@@ -283,7 +291,11 @@ struct ubi_vid_hdr {
 	__u8    compat;
 	__be32  vol_id;
 	__be32  lnum;
+#ifdef CONFIG_UBI_CRYPTO_HMAC
+	__be32  hmac_hdr_offset;
+#else
 	__u8    padding1[4];
+#endif // CONFIG_UBI_CRYPTO_HMAC
 	__be32  data_size;
 	__be32  used_ebs;
 	__be32  data_pad;
@@ -292,6 +304,55 @@ struct ubi_vid_hdr {
 	__be64  sqnum;
 	__u8    padding3[12];
 	__be32  hdr_crc;
+} __packed;
+
+/**
+ * struct ubi_hmac_hdr - on-flash HMAC tags header for a LEB.
+ * @magic: the HMAC header magic number (ASCII for "UBIC")
+ * @htag: the HMAC tag specific to the LEB
+ * @top_hmac: the HMAC tag for the first half of the LEB
+ * @btm_hmac: the HMAC tag for the second half of the LEB
+ * @data_len: the length of the data currently involved in the
+ *            HMAC tags calculation
+ * @padding1: padding bytes for 64 bytes alignment
+ * @crc     : the checksum of the header
+ *
+ * The @htag value will always be computed when the HMAC is enabled.
+ * It is computed using various figures specific to the LEB at a given time.
+ * Assuming K is the private key for the volume, the @htag value will be :
+ *     HMAC(VID|LEB|sqnum|PEB, K)
+ * Where :
+ *  - VID is the ID of the volume to which belongs the LEB
+ *  - LEB is the LEB number
+ *  - sqnum is the sqnum assigned to the LEB VID header at the time
+ *  - PEB is the number of the PEB mapped to the LEB
+ *
+ *
+ * Then, the @top_hmac and @btm_hmac fields are computed in the pattern :
+ *     HMAC(VID|LEB|sqnum|PEB|HALF, K)
+ * Where :
+ *  - VID, LEB, sqnum, PEB are the same as for @htag
+ *  - HALF is the targeted half of the LEB :
+ *    if @top_hmac, then the first half of the LEB is used.
+ *    if @btm_hmac, then it is the second half.
+ * These fields are always computed for a static volume.
+ * In the case of a dynamic volume, @top_hmac will be computed when
+ * a write operation will affect bytes of the second half of the LEB.
+ * @btm_hmac will be appended when the last byte of the LEB will be written.
+ *
+ * When the top and bottom HMAC tags does not exist,
+ * the corresponding header fields are filled with 0xFF bytes.
+ *
+ * HMAC-SHA1-128 will be used
+ */
+struct ubi_hmac_hdr {
+	__be32  magic;
+	__u8    htag[16];
+	__u8    top_hmac[16];
+	__u8    btm_hmac[16];
+	__be32  data_len;
+	__u8    padding1[4];
+	__be32  crc;
 } __packed;
 
 /* Internal UBI volumes count */
@@ -371,7 +432,12 @@ struct ubi_vtbl_record {
 	__be16  name_len;
 	__u8    name[UBI_VOL_NAME_MAX+1];
 	__u8    flags;
+#ifdef CONFIG_UBI_CRYPTO_HMAC
+	__u8    hmac;
+	__u8    padding[22];
+#else
 	__u8    padding[23];
+#endif // CONFIG_UBI_CRYPTO_HMAC
 	__be32  crc;
 } __packed;
 

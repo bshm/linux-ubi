@@ -144,6 +144,11 @@
 #define UBI_VOL_NUM_AUTO (-1)
 #define UBI_DEV_NUM_AUTO (-1)
 
+/*
+ * Define the key size in use for CTR-AES in UBI
+ */
+#define UBI_AES_KEY_SIZE 16
+
 /* Maximum volume name length */
 #define UBI_MAX_VOLUME_NAME 127
 
@@ -188,6 +193,9 @@
 /* Set an UBI volume property */
 #define UBI_IOCSETVOLPROP _IOW(UBI_VOL_IOC_MAGIC, 6, \
 			       struct ubi_set_vol_prop_req)
+/* Set (or unset) an UBI volume cryptographic key */
+#define UBI_IOCSETVOLKEY _IOW(UBI_VOL_IOC_MAGIC, 7, \
+				struct ubi_set_vol_key_req)
 
 /* Maximum MTD device name length supported by UBI */
 #define MAX_UBI_MTD_NAME_LEN 127
@@ -276,6 +284,7 @@ struct ubi_attach_req {
  * @vol_type: volume type (%UBI_DYNAMIC_VOLUME or %UBI_STATIC_VOLUME)
  * @padding1: reserved for future, not used, has to be zeroed
  * @name_len: volume name length
+ * @tagged: non zero if the volume has to be HMAC tagged
  * @padding2: reserved for future, not used, has to be zeroed
  * @name: volume name
  *
@@ -305,7 +314,8 @@ struct ubi_mkvol_req {
 	__s8 vol_type;
 	__s8 padding1;
 	__s16 name_len;
-	__s8 padding2[4];
+	__s8 tagged;
+	__s8 padding2[3];
 	char name[UBI_MAX_VOLUME_NAME + 1];
 } __packed;
 
@@ -416,5 +426,20 @@ struct ubi_set_vol_prop_req {
 	__u8  padding[7];
 	__u64 value;
 }  __packed;
+
+/**
+ * struct ubi_set_vol_key_req - a data structure used to set a UBI volume key
+ * @k: The actual key
+ * @rm: a flag to state if the user wants to set or remove a key
+ * @main: a flag to tell UBI to set this key as the master key for the volume
+ *
+ * If @rm is non-zero, then @k will be ignored and the key for the volume
+ * will be removed from the key tree.
+ */
+struct ubi_set_vol_key_req {
+	__u8 k[UBI_AES_KEY_SIZE];
+	__u8 rm;
+	__u8 main;
+} __packed;
 
 #endif /* __UBI_USER_H__ */

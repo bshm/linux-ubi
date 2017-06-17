@@ -42,6 +42,9 @@
 #include <linux/kernel.h>
 #include <linux/slab.h>
 #include "ubi.h"
+#ifdef CONFIG_MTD_UBI_CRYPTO
+#include "crypto.h"
+#endif // CONFIG_MTD_UBI_CRYPTO
 
 /* Maximum length of the 'mtd=' parameter */
 #define MTD_PARAM_LEN_MAX 64
@@ -708,6 +711,10 @@ static int io_init(struct ubi_device *ubi, int max_beb_per1024)
 	/* Calculate default aligned sizes of EC and VID headers */
 	ubi->ec_hdr_alsize = ALIGN(UBI_EC_HDR_SIZE, ubi->hdrs_min_io_size);
 	ubi->vid_hdr_alsize = ALIGN(UBI_VID_HDR_SIZE, ubi->hdrs_min_io_size);
+#ifdef CONFIG_UBI_CRYPTO_HMAC
+	ubi->hmac_hdr_alsize = ALIGN(UBI_HMAC_HDR_SIZE,
+			ubi->hdrs_min_io_size);
+#endif
 
 	dbg_gen("min_io_size      %d", ubi->min_io_size);
 	dbg_gen("max_write_size   %d", ubi->max_write_size);
@@ -726,9 +733,26 @@ static int io_init(struct ubi_device *ubi, int max_beb_per1024)
 						ubi->vid_hdr_aloffset;
 	}
 
-	/* Similar for the data offset */
+	/* Similar for the data offset
+	 * and the potential HMAC hdr offset */
 	ubi->leb_start = ubi->vid_hdr_offset + UBI_VID_HDR_SIZE;
 	ubi->leb_start = ALIGN(ubi->leb_start, ubi->min_io_size);
+#ifdef CONFIG_UBI_CRYPTO_HMAC
+	ubi->hmac_hdr_offset = ubi->vid_hdr_aloffset + ubi->vid_hdr_alsize;
+	ubi->hmac_hdr_aloffset = ubi->vid_hdr_aloffset
+			+ ubi->vid_hdr_alsize;
+	ubi->hmac_hdr_shift = ubi->hmac_hdr_offset -
+					ubi->hmac_hdr_aloffset;
+	ubi->hmac_leb_start = ubi->hmac_hdr_offset + UBI_HMAC_HDR_SIZE;
+	printk("HMAC leb start is %d\n", ubi->hmac_leb_start);
+	ubi->hmac_leb_start = ALIGN(ubi->hmac_leb_start, ubi->min_io_size);
+	ubi->hmac_leb_size = ubi->peb_size - ubi->hmac_leb_start;
+	printk(KERN_ALERT "HMAC hdr params :\n"
+			"hmac_leb_start=%d\n"
+			"hmac_leb_size=%d\n"
+			"min_io_size=%d\n",
+			ubi->hmac_leb_start, ubi->hmac_leb_size, ubi->min_io_size);
+#endif
 
 	dbg_gen("vid_hdr_offset   %d", ubi->vid_hdr_offset);
 	dbg_gen("vid_hdr_aloffset %d", ubi->vid_hdr_aloffset);
@@ -1250,7 +1274,9 @@ static int __init ubi_init(void)
 	if (err)
 		goto out_slab;
 
-
+#ifdef CONFIG_MTD_UBI_CRYPTO
+	ubi_crypto_init();
+#endif // CONFIG_MTD_UBI_CRYPTO
 	/* Attach MTD devices */
 	for (i = 0; i < mtd_devs; i++) {
 		struct mtd_dev_param *p = &mtd_dev_param[i];
@@ -1289,7 +1315,6 @@ static int __init ubi_init(void)
 				goto out_detach;
 		}
 	}
-
 	return 0;
 
 out_detach:
@@ -1300,6 +1325,9 @@ out_detach:
 			mutex_unlock(&ubi_devices_mutex);
 		}
 	ubi_debugfs_exit();
+#ifdef CONFIG_MTD_UBI_CRYPTO
+	ubi_crypto_term();
+#endif
 out_slab:
 	kmem_cache_destroy(ubi_wl_entry_slab);
 out_dev_unreg:
@@ -1329,6 +1357,9 @@ static void __exit ubi_exit(void)
 	misc_deregister(&ubi_ctrl_cdev);
 	class_remove_file(ubi_class, &ubi_version);
 	class_destroy(ubi_class);
+#ifdef CONFIG_MTD_UBI_CRYPTO
+	ubi_crypto_term();
+#endif // CONFIG_MTD_UBI_CRYPTO
 }
 module_exit(ubi_exit);
 

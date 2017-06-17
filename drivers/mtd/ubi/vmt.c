@@ -204,6 +204,10 @@ int ubi_create_volume(struct ubi_device *ubi, struct ubi_mkvol_req *req)
 	struct ubi_volume *vol;
 	struct ubi_vtbl_record vtbl_rec;
 	dev_t dev;
+#ifdef CONFIG_UBI_CRYPTO_HMAC
+	int leb_size = (ubi->hmac) ? ubi->hmac_leb_size
+			: ubi->leb_size;
+#endif // CONFIG_UBI_CRYPTO_HMAC
 
 	if (ubi->ro_mode)
 		return -EROFS;
@@ -251,7 +255,12 @@ int ubi_create_volume(struct ubi_device *ubi, struct ubi_mkvol_req *req)
 		}
 
 	/* Calculate how many eraseblocks are requested */
+#ifdef CONFIG_UBI_CRYPTO_HMAC
+	vol->usable_leb_size = leb_size -
+			leb_size % req->alignment;
+#else
 	vol->usable_leb_size = ubi->leb_size - ubi->leb_size % req->alignment;
+#endif // CONFIG_UBI_CRYPTO_HMAC
 	vol->reserved_pebs += div_u64(req->bytes + vol->usable_leb_size - 1,
 				      vol->usable_leb_size);
 
@@ -270,7 +279,12 @@ int ubi_create_volume(struct ubi_device *ubi, struct ubi_mkvol_req *req)
 
 	vol->vol_id    = vol_id;
 	vol->alignment = req->alignment;
+#ifdef CONFIG_UBI_CRYPTO_HMAC
+	vol->data_pad  = leb_size % vol->alignment;
+	vol->hmac = !!ubi->hmac;
+#else
 	vol->data_pad  = ubi->leb_size % vol->alignment;
+#endif // CONFIG_UBI_CRYPTO_HMAC
 	vol->vol_type  = req->vol_type;
 	vol->name_len  = req->name_len;
 	memcpy(vol->name, req->name, vol->name_len);
@@ -340,6 +354,9 @@ int ubi_create_volume(struct ubi_device *ubi, struct ubi_mkvol_req *req)
 	vtbl_rec.alignment     = cpu_to_be32(vol->alignment);
 	vtbl_rec.data_pad      = cpu_to_be32(vol->data_pad);
 	vtbl_rec.name_len      = cpu_to_be16(vol->name_len);
+#ifdef CONFIG_UBI_CRYPTO_HMAC
+	vtbl_rec.hmac = vol->hmac;
+#endif // CONFIG_UBI_CRYPTO_HMAC
 	if (vol->vol_type == UBI_DYNAMIC_VOLUME)
 		vtbl_rec.vol_type = UBI_VID_DYNAMIC;
 	else
@@ -732,8 +749,14 @@ static int self_check_volume(struct ubi_device *ubi, int vol_id)
 		ubi_err("alignment is not multiple of min I/O unit");
 		goto fail;
 	}
-
+#ifdef CONFIG_UBI_CRYPTO_HMAC
+	if (ubi->vtbl[idx].hmac)
+		n = ubi->hmac_leb_size % vol->alignment;
+	else
+		n = ubi->leb_size % vol->alignment;
+#else
 	n = ubi->leb_size % vol->alignment;
+#endif // CONFIG_UBI_CRYPTO_HMAC
 	if (vol->data_pad != n) {
 		ubi_err("bad data_pad, has to be %lld", n);
 		goto fail;
